@@ -1,0 +1,9 @@
+# vscode
+.vscode/
+
+# python temporal files
+*.pyc
+__pycache__/
+
+# files of docx
+*.docx
