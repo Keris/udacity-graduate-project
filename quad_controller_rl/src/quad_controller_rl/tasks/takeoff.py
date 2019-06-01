@@ -28,9 +28,6 @@ class Takeoff(BaseTask):
         self.max_duration = 5.0  # secs
         self.target_z = 10.0  # target height (z position) to reach for successful takeoff
 
-        # Print position z
-        self.count = 0
-
     def reset(self):
         # Nothing to reset; just return initial condition
         return Pose(
@@ -50,9 +47,6 @@ class Takeoff(BaseTask):
         # Compute reward / penalty and check if this episode is complete
         done = False
         reward = -min(abs(self.target_z - pose.position.z), 20.0)  # reward = zero for matching target z, -ve as you go farther, upto -20
-        if pose.position.z >= self.target_z or self.count % 20 == 0:
-            print('position z: {}'.format(pose.position.z))
-        self.count += 1
         if pose.position.z >= self.target_z:  # agent has crossed the target height
             reward += 10.0  # bonus reward
             done = True
@@ -75,4 +69,4 @@ class Takeoff(BaseTask):
             return Wrench(), done
 
     def __repr__(self):
-        return Takeoff.__name__
+        return self.__class__.__name__

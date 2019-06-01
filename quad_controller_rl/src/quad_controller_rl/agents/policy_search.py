@@ -1,32 +1,29 @@
 """Policy search agent."""
 import os
-import pandas as pd
 
 import numpy as np
+import pandas as pd
 from quad_controller_rl import util
 from quad_controller_rl.agents.base_agent import BaseAgent
 
-class MyAgent(BaseAgent):
+class RandomPolicySearch(BaseAgent):
     """Sample agent that searches for optimal policy randomly."""
 
     def __init__(self, task):
         # Task (environment) information
         self.task = task  # should contain observation_space and action_space
-        self.state_size = 3 # position only
+        # self.state_size = np.prod(self.task.observation_space.shape)
+        self.state_size = 3
         self.state_range = self.task.observation_space.high - self.task.observation_space.low
-        self.action_size = 3 # force only
+
+        self.action_size = 3
+        # self.action_size = np.prod(self.task.action_space.shape)
         self.action_range = self.task.action_space.high - self.task.action_space.low
-        #print('action range: {}'.format(self.action_range))  # [debug]
-        print('original spaces: {}, {}\nConstrained spaces: {}, {}'.format(
-            self.task.observation_space.shape, self.task.action_space.shape,
-            self.state_size, self.action_size))
 
         # Policy parameters
         self.w = np.random.normal(
             size=(self.state_size, self.action_size),  # weights for simple linear policy: state_space x action_space
-            scale=(self.action_range[:self.action_size] / (2 * self.state_size)).reshape(1, -1))  # start producing actions in a decent range
-
-        print('shape of w: {}'.format(np.shape(self.w)))
+            scale=(self.action_range[:3] / (2 * self.state_size)).reshape(1, -1))  # start producing actions in a decent range
 
         # Score tracker and learning parameters
         self.best_w = None
@@ -39,7 +36,7 @@ class MyAgent(BaseAgent):
         # Save episode stats
         self.stats_filename = os.path.join(
             util.get_param('out'),
-            '{}_stats_{}.csv'.format(self.task.__name__, util.get_timestamp()))  # path to CSV file
+            '{}_{}_stats_{}.csv'.format(self.task, self, util.get_timestamp()))  # path to CSV file
         self.stats_columns = ['episode', 'total_reward']  # specify columns to save
         self.episode_num = 1
         print('Saving stats {} to {}'.format(self.stats_columns, self.stats_filename))  # [debug]
@@ -65,13 +62,13 @@ class MyAgent(BaseAgent):
         self.last_action = None
         self.total_reward = 0.0
         self.count = 0
+        self.noise_scale = 0.1
 
     def step(self, state, reward, done):
         # Transform state vector
         state = (state - self.task.observation_space.low) / self.state_range  # scale to [0.0, 1.0]
         state = state.reshape(1, -1)  # convert to row vector
-        state = self.preprocess_state(state) # reduce state vector
-        #print('state: {}'.format(state))  # [debug]
+        state = self.preprocess_state(state)
 
         # Choose an action
         action = self.act(state)
@@ -96,7 +93,8 @@ class MyAgent(BaseAgent):
     def act(self, state):
         # Choose action based on given state and policy
         action = np.dot(state, self.w)  # simple linear policy
-        #print(action)  # [debug: action vector]
+        if self.count % 20 == 0:
+            print(action)  # [debug: action vector]
         return action
 
     def learn(self):
@@ -114,3 +112,6 @@ class MyAgent(BaseAgent):
         print("RandomPolicySearch.learn(): t = {:4d}, score = {:7.3f} (best = {:7.3f}), noise_scale = {}".format(
                 self.count, score, self.best_score, self.noise_scale))  # [debug]
         #print(self.w)  # [debug: policy parameters]
+
+    def __repr__(self):
+        return self.__class__.__name__

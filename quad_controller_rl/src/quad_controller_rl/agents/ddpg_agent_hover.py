@@ -1,28 +1,96 @@
 import os
+import random
+
+from collections import namedtuple, deque
 
 import numpy as np
 import pandas as pd
 
 from quad_controller_rl import util
-from quad_controller_rl.replay_buffer import ReplayBuffer
-from quad_controller_rl.ornstein_uhlenbeck_noise import OUNoise
-from quad_controller_rl.agents.actor import Actor
-from quad_controller_rl.agents.critic import Critic
 from quad_controller_rl.agents.base_agent import BaseAgent
+from quad_controller_rl.agents.model import Actor, Critic
 
 
-class DDPG(BaseAgent):
+class OUNoise:
+    '''Ornstein-Uhlenbeck process.'''
+
+    def __init__(self, size, mu=None, theta=0.15, sigma=0.3):
+        '''Initialize parameters and noise process.'''
+        self.size = size
+        self.mu = mu if mu is not None else np.zeros(self.size)
+        self.theta = theta
+        self.sigma = sigma
+        self.state = np.ones(self.size) + self.mu
+        self.reset()
+
+    def reset(self):
+        '''Reset the internal state (= noise) to mean (mu).'''
+        self.state = self.mu
+
+    def sample(self):
+        '''Update internal state and return it as a noise sample.'''
+        x = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(len(x))
+        self.state = x + dx
+        return self.state
+
+
+class ReplayBuffer:
+    """Fixed-size circular buffer to store experience tuples."""
+
+    def __init__(self, size=1000):
+        """Initialize a ReplayBuffer object."""
+        self.size = size  # maximum size of buffer
+        self.memory = []  # internal memory (list)
+        self.idx = 0  # current index into circular buffer
+        self.experience = namedtuple("Experience",
+            field_names=["state", "action", "reward", "next_state", "done"])
+
+    def add(self, state, action, reward, next_state, done):
+        """Add a new experience to memory."""
+        # Create an Experience object, add it to memory
+        # Note: If memory is full, start overwriting from the beginning
+        if len(self.memory) < self.size:
+            self.memory.append(None)
+        self.memory[self.idx] = self.experience(state, action, reward, next_state, done)
+        self.idx = (self.idx + 1) % self.size
+
+    def sample(self, batch_size=64):
+        """Randomly sample a batch of experiences from memory."""
+        # Return a list or tuple of Experience objects sampled from memory
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        """Return the current size of internal memory."""
+        return len(self.memory)
+
+
+class DDPGAgentHover(BaseAgent):
     '''Reinforcement Learning agent that learns using DDPG.'''
     def __init__(self, task):
         # Task (environment) information
         self.task = task
-        self.state_size = 3  # position only
+        self.state_size = 7
         self.action_size = 3  # force only
-        self.state_range = self.task.observation_space.high - self.task.observation_space.low
 
-        # Actor (Policy) Model
+        self.state_low = np.concatenate([
+            self.task.observation_space.low[:3],
+            np.array([0.0, 0.0, 0.0, 0.0])
+        ])
+        self.state_high = np.concatenate([
+            self.task.observation_space.high[:3],
+            self.task.observation_space.high[:3] - self.task.observation_space.low[:3],
+            np.array([self.task.observation_space.high[2] - 10.0])
+        ])
+        self.state_range = self.state_high - self.state_low
+        print("state low: {} state high: {} state range: {}".format(
+            self.state_low, self.state_high, self.state_range))
+
+        # clip action
         self.action_low = self.task.action_space.low[:self.action_size]
         self.action_high = self.task.action_space.high[:self.action_size]
+
+        # Actor (Policy) Model
         self.actor_local = Actor(self.state_size, self.action_size, self.action_low, self.action_high)
         self.actor_target = Actor(self.state_size, self.action_size, self.action_low, self.action_high)
 
@@ -55,10 +123,25 @@ class DDPG(BaseAgent):
         # Save episode stats
         self.stats_filename = os.path.join(
             util.get_param('out'),
-            '{}_stats_{}.csv'.format(self.task, util.get_timestamp()))  # path to CSV file
+            'hover/stats_{}.csv'.format(util.get_timestamp()))  # path to CSV file
         self.stats_columns = ['episode', 'total_reward']  # specify columns to save
-        self.episode_num = 1
         print('Saving stats {} to {}'.format(self.stats_columns, self.stats_filename))  # [debug]
+
+        # Save weights
+        self.save_weights_every = 100
+        self.actor_filename = os.path.join(
+            util.get_param('out'),
+            'hover/actor_checkpoints_{}.h5'.format(util.get_timestamp())
+        )
+        self.critic_filename = os.path.join(
+            util.get_param('out'),
+            'hover/critic_checkpoints_{}.h5'.format(util.get_timestamp())
+        )
+        print('Actor filename: ', self.actor_filename)
+        print('Critic filename: ', self.critic_filename)
+        
+        self.episode_num = 1
+        self.reset_episode_vars()
 
     def write_stats(self, stats):
         '''Write single episode stats to CSV file.'''
@@ -68,12 +151,12 @@ class DDPG(BaseAgent):
 
     def preprocess_state(self, state):
         '''Reduce state vector to relevant dimensions.'''
-        return state[:, :3] # position only
+        return state[:self.state_size]
 
     def postprocess_action(self, action):
         '''Return complete action vector.'''
         complete_action = np.zeros(self.task.action_space.shape)  # shape: (6, )
-        complete_action[0:3] = action
+        complete_action[0:self.action_size] = action
         return complete_action
 
     def reset_episode_vars(self):
@@ -81,12 +164,13 @@ class DDPG(BaseAgent):
         self.last_action = None
         self.total_reward = 0.0
         self.count = 0
+        self.noise.reset()
 
     def step(self, state, reward, done):
         # Transform state vector
-        state = (state - self.task.observation_space.low) / self.state_range  # scale to [0.0, 1.0]
-        state = state.reshape(1, -1)  # convert to row vector
+        # state = state.reshape(1, -1)  # convert to row vector
         state = self.preprocess_state(state)  # reduce state vector
+        state = (state - self.state_low) / self.state_range  # scale to [0.0, 1.0]
 
         # Choose an action
         action = self.act(state)
@@ -105,7 +189,12 @@ class DDPG(BaseAgent):
         if done:
             # Write episode stats
             self.write_stats([self.episode_num, self.total_reward])
+            if self.episode_num % self.save_weights_every == 0:
+                print("Saving model weights... (episode_num: {})".format(self.episode_num))
+                self.actor_local.model.save_weights(self.actor_filename)
+                self.critic_local.model.save_weights(self.critic_filename)
             self.episode_num += 1
+
             score = self.total_reward / float(self.count) if self.count else 0.0
             if score > self.best_score:
                 self.best_score = score
@@ -116,11 +205,13 @@ class DDPG(BaseAgent):
         self.last_action = action
         return self.postprocess_action(action)
 
-    def act(self, states):
+    def act(self, states, add_noise=True):
         '''Return actions for given state(s) as per current policy.'''
         states = np.reshape(states, [-1, self.state_size])
         actions = self.actor_local.model.predict(states)
-        return actions + self.noise.sample()  # add some noise for exploration
+        if add_noise:
+            actions += self.noise.sample()  # add some noise for exploration
+        return actions
 
     def learn(self, experiences):
         '''Update policy and value parameters using given batch of experience tuples.'''
